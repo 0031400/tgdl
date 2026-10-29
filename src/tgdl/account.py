@@ -15,7 +15,7 @@ import logging
 import time
 
 from .config import Config
-from .keys import KeyCache
+from .keys import KeyStore
 from .qr import render as render_qr
 
 
@@ -62,21 +62,80 @@ def remove_session(cfg: Config, account_id: int) -> None:
     for candidate in (path, path.with_suffix(".session-journal")):
         with contextlib.suppress(FileNotFoundError):
             candidate.unlink()
-    KeyCache(cfg.keys_path).drop_account(account_id)
+    KeyStore(cfg.keys_path).drop_account(account_id)
+
+
+def _inject(cfg: Config, account_id: int, cred: dict) -> None:
+    """把 keys.json 里的一条主 key 写进 session 文件。"""
+    from telethon.crypto import AuthKey
+    from telethon.sessions import SQLiteSession
+
+    cfg.ensure_dirs()
+    session = SQLiteSession(str(cfg.session_path(account_id)))
+    try:
+        session.set_dc(cred["dc"], cred["ip"], cred["port"])
+        session.auth_key = AuthKey(bytes.fromhex(cred["key"]))
+        session.save()
+    finally:
+        session.close()
+
+
+def apply_credentials(cfg: Config, account_ids: list[int] | None = None,
+                      *, force: bool = False) -> list[str]:
+    """把 keys.json 里的主 key 灌进 session 文件，返回做了什么的说明。
+
+    ``force=False`` 时只补「session 里还没有 key」的账号（``make_client`` 用）；
+    ``accounts`` 用 ``force=True``，因为你可能刚手改过 keys.json，要以它为准。
+    """
+    from telethon.sessions import SQLiteSession
+
+    store = KeyStore(cfg.keys_path)
+    ids = account_ids if account_ids is not None else store.with_main_key()
+    notes: list[str] = []
+    for account_id in ids:
+        cred = store.main(account_id)
+        if cred is None:
+            continue
+        if not force:
+            session = SQLiteSession(str(cfg.session_path(account_id)))
+            try:
+                if session.auth_key is not None:
+                    continue
+            finally:
+                session.close()
+        _inject(cfg, account_id, cred)
+        notes.append(f"[{account_id}] 已从 keys.json 载入（DC{cred['dc']}）")
+    return notes
 
 
 def make_client(cfg: Config, account_id: int):
-    """按编号建客户端。session 由 Telethon 管理，key 就存在里面。"""
+    """按编号建客户端。session 由 Telethon 管理，key 就存在里面。
+
+    如果 session 里还没有 key，但 keys.json 里写了这个账号，就先灌进去——
+    这样手改 keys.json 之后直接 download 也能用。
+    """
     TelegramClient, _, _, _ = _telethon()
     from telethon.sessions import SQLiteSession
 
     logging.getLogger("telethon").setLevel(logging.WARNING)
     cfg.ensure_dirs()
+    apply_credentials(cfg, [account_id], force=False)
     session = SQLiteSession(str(cfg.session_path(account_id)))
     client = TelegramClient(session, cfg.api_id, cfg.api_hash, device_model="tgdl")
     # FLOOD_WAIT 自己处理：Telethon 的全局等待会把所有账号一起卡住
     client.flood_sleep_threshold = 0
     return client
+
+
+def _remember(cfg: Config, account_id: int, client) -> None:
+    """登录成功后把主 key 记进 keys.json，让它始终是「凭据清单」。"""
+    session = client.session
+    key = session.auth_key
+    if key is None or not key.key or not session.dc_id:
+        return
+    KeyStore(cfg.keys_path).set_main(
+        account_id, session.dc_id, session.server_address, session.port, key.key
+    )
 
 
 def _label(me) -> str:
@@ -180,6 +239,7 @@ async def login(
                 await _login_phone(client, account_id, passwords)
 
             me = await client.get_me()
+            _remember(cfg, account_id, client)
             lines.append(f"[{account_id}] 登录成功：{_label(me)}")
         finally:
             await client.disconnect()

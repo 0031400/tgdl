@@ -20,7 +20,7 @@ from typing import Any
 from .account import TgdlError, _telethon, check_crypto, make_client
 from .config import Config
 from .db import ProgressDb
-from .keys import KeyCache
+from .keys import KeyStore
 from .util import human_size, to_mtproto_id, to_tdlib_id
 
 MAX_CHUNK = 1 << 20
@@ -199,21 +199,21 @@ async def ensure_sender(cfg: Config, client, account_id: int, dc_id: int | None,
     if not dc_id or dc_id == own:
         return client._sender          # 文件就在自己的 DC 上，直接用主连接
 
-    cache = KeyCache(cfg.keys_path)
-    cached = cache.get(account_id, dc_id)
+    cache = KeyStore(cfg.keys_path)
+    cached = cache.dc_key(account_id, dc_id)
     if cached:
         try:
             sender = await _open_with_key(client, dc_id, cached)
             stack.push_async_callback(_close, sender)
             return sender
         except Exception:  # noqa: BLE001
-            cache.drop(account_id, dc_id)      # 缓存失效就丢掉，走下面的导出
+            cache.drop_dc_key(account_id, dc_id)   # 缓存失效就丢掉，走下面的导出
 
     # 借一条导出连接（Telethon 内部做 export + import）
     sender = await stack.enter_async_context(_borrowed(client, dc_id))
     key = getattr(getattr(sender, "auth_key", None), "key", None)
     if key:
-        cache.set(account_id, dc_id, key)      # 下次就不用再导出了
+        cache.set_dc_key(account_id, dc_id, key)   # 下次就不用再导出了
     return sender
 
 
@@ -502,7 +502,7 @@ async def _run(
                       f"（累计 {conn.floods} 次）")
                 last = exc
             except errors.FileReferenceExpiredError as exc:
-                KeyCache(cfg.keys_path).drop(conn.account_id, chosen.dc_id or 0)
+                KeyStore(cfg.keys_path).drop_dc_key(conn.account_id, chosen.dc_id or 0)
                 raise TgdlError("file_reference 失效，重跑一次即可") from exc
             except (errors.RPCError, OSError) as exc:
                 last = exc

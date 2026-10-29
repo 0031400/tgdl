@@ -22,6 +22,7 @@ from rich.table import Table
 from . import __version__
 from .account import (
     TgdlError,
+    apply_credentials,
     describe,
     list_accounts,
     login as do_login,
@@ -30,7 +31,7 @@ from .account import (
 )
 from .config import Config, ConfigError, load_config
 from .download import album_candidates, download as do_download
-from .keys import KeyCache
+from .keys import KeyStore
 from .util import human_size, parse_size, parse_target
 
 app = typer.Typer(add_completion=False, no_args_is_help=True,
@@ -142,8 +143,12 @@ def logout(
 
 @app.command()
 def accounts() -> None:
-    """列出账号（联网确认姓名 / 用户名 / 主 DC）。"""
+    """列出账号（先按 keys.json 刷新会话，再联网确认）。"""
     cfg = _load()
+    # keys.json 是凭据清单：手改过就先灌进 session 文件，再联网确认
+    for note in apply_credentials(cfg, force=True):
+        console.print(f"[green]{note}[/green]")
+
     ids = list_accounts(cfg)
     if not ids:
         console.print("[yellow]还没有账号。`tgdl login --account 1`[/yellow]")
@@ -156,7 +161,7 @@ def accounts() -> None:
     table.add_column("主 DC", justify="center")
     table.add_column("DC key 缓存")
 
-    cache = KeyCache(cfg.keys_path).summary()
+    cache = KeyStore(cfg.keys_path).summary()
     seen: dict[int, int] = {}
     dupes: list[str] = []
     for account_id in ids:
