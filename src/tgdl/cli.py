@@ -29,7 +29,7 @@ from .account import (
     make_client,
 )
 from .config import Config, ConfigError, load_config
-from .download import album_candidates, download as do_download, pick_candidate
+from .download import album_candidates, download as do_download
 from .keys import KeyCache
 from .util import human_size, parse_size, parse_target
 
@@ -157,6 +157,8 @@ def accounts() -> None:
     table.add_column("DC key 缓存")
 
     cache = KeyCache(cfg.keys_path).summary()
+    seen: dict[int, int] = {}
+    dupes: list[str] = []
     for account_id in ids:
         info = _run(describe(cfg, account_id))
         cached = cache.get(account_id) or {}
@@ -168,63 +170,81 @@ def accounts() -> None:
                 f"DC{info['dc']}" if info.get("dc") else "—",
                 cached_text,
             )
+            uid = info.get("uid")
+            if uid:
+                if uid in seen:
+                    dupes.append(f"#{account_id} 和 #{seen[uid]} 是同一个账号")
+                else:
+                    seen[uid] = account_id
         else:
             table.add_row(str(account_id), "[red]未登录[/red]", "—", "—", cached_text)
     console.print(table)
+    if dupes:
+        console.print(
+            "[yellow]注意：" + "；".join(dupes)
+            + "。同时用会共用同一份限流额度，等于白开一条连接。"
+            + "不要的话 `tgdl logout --account <编号>`。[/yellow]"
+        )
 
 
 @app.command()
 def info(
     target: str = typer.Argument(..., help="chat_id:message_id"),
-    pick: int = typer.Option(0, "--pick", help="相册里选第几个（1 起），0=最大"),
-    account: Optional[int] = typer.Option(None, "--account", "-a", help="用哪个编号查"),
+    account: Optional[int] = typer.Option(
+        None, "--account", "-a", help="只用这个编号查；不填就逐个试，谁先查到用谁"
+    ),
 ) -> None:
-    """看这条消息里有什么文件（不下载）。"""
+    """列出这条消息里的所有文件（不下载）。"""
     cfg = _load()
     try:
         chat_id, message_id = parse_target(target)
     except ValueError as exc:
         err.print(f"[red]{exc}[/red]")
         raise typer.Exit(2) from exc
-    ids = list_accounts(cfg)
+
+    ids = [account] if account else list_accounts(cfg)
     if not ids:
         raise typer.BadParameter("还没有账号，先 `tgdl login --account 1`")
-    account_id = account or ids[0]
-    _run(_info(cfg, account_id, chat_id, message_id, pick))
+
+    candidates, used = _run(_info(cfg, ids, chat_id, message_id))
+    if account is None and used != ids[0]:
+        console.print(f"[dim]（编号 {used} 查到的）[/dim]")
+
+    table = Table(box=box.SIMPLE, header_style="bold")
+    table.add_column("#", justify="right")
+    table.add_column("文件名")
+    table.add_column("大小", justify="right")
+    table.add_column("DC", justify="center")
+    for i, cand in enumerate(candidates, 1):
+        table.add_row(str(i), cand.name, human_size(cand.size), str(cand.dc_id))
+    console.print(table)
 
 
-async def _info(cfg: Config, account_id: int, chat_id: int, message_id: int,
-                pick: int) -> None:
-    client = make_client(cfg, account_id)
-    await client.connect()
-    try:
-        if not await client.is_user_authorized():
-            raise TgdlError(f"账号 {account_id} 未登录")
-        candidates = await album_candidates(client, chat_id, message_id)
-        chosen, no = pick_candidate(candidates, pick)
-
-        table = Table(box=box.SIMPLE, header_style="bold")
-        table.add_column("项")
-        table.add_column("值")
-        table.add_row("文件", chosen.name)
-        table.add_row("大小", human_size(chosen.size))
-        table.add_row("DC", str(chosen.dc_id))
-        table.add_row("序号", f"{no} / {len(candidates)}")
-        console.print(table)
-
-        if len(candidates) > 1:
-            album = Table(box=box.SIMPLE, header_style="bold")
-            album.add_column("#", justify="right")
-            album.add_column("文件")
-            album.add_column("大小", justify="right")
-            album.add_column("DC", justify="center")
-            for i, cand in enumerate(candidates, 1):
-                album.add_row(str(i), cand.name, human_size(cand.size),
-                              str(cand.dc_id))
-            console.print("[bold]这条消息是相册：[/bold]")
-            console.print(album)
-    finally:
-        await client.disconnect()
+async def _info(cfg: Config, ids: list[int], chat_id: int, message_id: int):
+    """按编号顺序试，返回第一个能查到这条消息的账号。"""
+    last: Exception | None = None
+    for account_id in ids:
+        client = make_client(cfg, account_id)
+        await client.connect()
+        try:
+            if not await client.is_user_authorized():
+                print(f"[{account_id}] 未登录，换下一个")
+                last = TgdlError(f"账号 {account_id} 未登录")
+                continue
+            try:
+                candidates = await album_candidates(client, chat_id, message_id)
+            except TgdlError as exc:
+                print(f"[{account_id}] {exc}，换下一个")
+                last = exc
+                continue
+            if not candidates:
+                print(f"[{account_id}] 这条消息里没有可下载的媒体，换下一个")
+                last = TgdlError("这条消息里没有可下载的媒体")
+                continue
+            return candidates, account_id
+        finally:
+            await client.disconnect()
+    raise last or TgdlError("没有可用账号")
 
 
 @app.command()
@@ -252,6 +272,9 @@ def download(
         connections=connections,
         chunk=parse_size(chunk) if chunk else None,
     ))
+    if result.skipped:
+        console.print(f"[yellow]已经下过了，跳过：{result.path}[/yellow]")
+        return
     console.print(
         f"\n完成 [green]{result.path}[/green]  {human_size(result.size)}  "
         f"耗时 {result.seconds:.2f}s  平均 {result.speed / 1048576:.2f} MiB/s"

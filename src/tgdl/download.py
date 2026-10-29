@@ -307,6 +307,7 @@ class Result:
     seconds: float
     name: str
     resumed: bool = False
+    skipped: bool = False          # 文件本来就在，这次没下
     per_account: dict[int, int] = field(default_factory=dict)
     floods: int = 0
 
@@ -356,14 +357,34 @@ async def download(
                 )
             clients[account_id] = client
 
+        # 同一个 Telegram 账号登了两次（两个会话文件）没有意义：
+        # 它们共用一份限流额度，多开的那条只会白白抢请求。留编号最小的。
+        if len(clients) > 1:
+            mes = await asyncio.gather(
+                *(c.get_me() for c in clients.values()), return_exceptions=True
+            )
+            owner: dict[int, int] = {}
+            for account_id, me in zip(list(clients), mes):
+                uid = getattr(me, "id", None)
+                if uid is None:
+                    continue
+                if uid in owner:
+                    print(f"[{account_id}] 和账号 {owner[uid]} 是同一个 Telegram 账号，"
+                          f"跳过它（同一个号开两条连接没有意义）")
+                    with contextlib.suppress(Exception):
+                        await clients.pop(account_id).disconnect()
+                else:
+                    owner[uid] = account_id
+            account_ids = [i for i in account_ids if i in clients]
+
         base = clients[account_ids[0]]
         candidates = await album_candidates(base, chat_id, message_id)
         chosen, pick_no = pick_candidate(candidates, pick)
         if len(candidates) > 1:
-            print(f"这条消息是相册，共 {len(candidates)} 个文件：")
-            for i, cand in enumerate(candidates, 1):
-                print(f"  {i}. {cand.name}  {human_size(cand.size)}  DC{cand.dc_id}")
-        print(f"选第 {pick_no} 个：{chosen.name}（{human_size(chosen.size)}）")
+            print(f"相册 {len(candidates)} 个文件，选第 {pick_no} 个："
+                  f"{chosen.name}（{human_size(chosen.size)}）")
+        else:
+            print(f"{chosen.name}（{human_size(chosen.size)}）")
 
         # 公开频道：让没订阅的账号也能用 @username 解析
         username = None
@@ -390,6 +411,18 @@ async def download(
         target = Path(output) if output else cfg.download_dir / chosen.name
         if target.is_dir():
             target = target / chosen.name
+
+        # 已经下完的就别再下一遍。
+        # 注意不能只看文件大小：我们开工前会按最终大小预分配，中断的下载也留着
+        # 一个「大小刚好」的文件。所以还要确认 db 里没有它的未完成记录。
+        if target.exists() and target.stat().st_size == chosen.size:
+            probe = ProgressDb(cfg.db_path)
+            half_done = probe.exists(f"{chat_id}:{chosen.message_id}")
+            probe.close()
+            if not half_done:
+                return Result(path=target, size=chosen.size, seconds=0.0,
+                              name=chosen.name, skipped=True)
+
         target.parent.mkdir(parents=True, exist_ok=True)
 
         async with contextlib.AsyncExitStack() as stack:

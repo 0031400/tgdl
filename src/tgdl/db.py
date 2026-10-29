@@ -67,5 +67,11 @@ class ProgressDb:
         self._conn.execute("DELETE FROM progress WHERE key = ?", (key,))
         self._conn.commit()
 
+    def exists(self, key: str) -> bool:
+        """这条 key 有没有未完成的进度记录（用来判断文件是不是下了一半）。"""
+        return self._conn.execute(
+            "SELECT 1 FROM progress WHERE key = ? LIMIT 1", (key,)
+        ).fetchone() is not None
+
     def keys(self) -> list[str]:
         return [r[0] for r in self._conn.execute("SELECT key FROM progress")]

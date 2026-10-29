@@ -169,8 +169,10 @@ async def login(
         try:
             if await client.is_user_authorized():
                 me = await client.get_me()
-                lines.append(f"[{account_id}] 已登录：{_label(me)}")
-                continue
+                raise TgdlError(
+                    f"账号 {account_id} 已经登录过（{_label(me)}），拒绝重复登录。"
+                    f"要重登先 `tgdl logout --account {account_id}`"
+                )
 
             if mode == "qr":
                 await _login_qr(client, account_id, passwords)
@@ -216,6 +218,7 @@ async def describe(cfg: Config, account_id: int) -> dict:
         return {
             "id": account_id,
             "ok": True,
+            "uid": me.id,
             "name": me.first_name or "",
             "username": f"@{me.username}" if me.username else "",
             "dc": client.session.dc_id,
