@@ -1,0 +1,11 @@
+[telegram]
+api_id = 11111111
+api_hash = "11111111111111111111111111111111"
+
+[download]
+dir = "data/download"
+chunk = "1MiB"
+connections = 4
+
+[data]
+dir = "data"
