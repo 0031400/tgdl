@@ -1,0 +1,64 @@
+/* 每条消息下面的 chat_id:message_id 小条。
+   用 inline-flex 而不是 block，这样它跟着气泡那一侧对齐：
+   别人发的靠左、自己发的靠右。
+   颜色只用 currentColor / rgba，跟随 Telegram 自己的明暗主题。 */
+
+.tgdl-idrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 3px 2px 0;
+  padding: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  font: 11px/1.5 ui-monospace, SFMono-Regular, Consolas, "Courier New", monospace;
+  color: currentColor;
+  opacity: 0.55;
+  user-select: text;
+  vertical-align: top;
+}
+
+.tgdl-idrow:hover {
+  opacity: 1;
+}
+
+.tgdl-idrow code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(127, 127, 127, 0.16);
+  white-space: nowrap;
+  user-select: all;
+}
+
+.tgdl-idrow.warn code {
+  background: rgba(220, 140, 0, 0.2);
+}
+
+.tgdl-idrow button {
+  flex: none;
+  padding: 1px 7px;
+  border: 1px solid rgba(127, 127, 127, 0.45);
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: 1.4;
+  cursor: pointer;
+  opacity: 0.9;
+}
+
+.tgdl-idrow button:hover {
+  background: rgba(127, 127, 127, 0.18);
+}
+
+.tgdl-idrow button.ok {
+  border-color: rgba(30, 160, 90, 0.8);
+  color: rgb(30, 160, 90);
+  opacity: 1;
+}
+
+.tgdl-idrow button.bad {
+  border-color: rgba(210, 75, 75, 0.8);
+  color: rgb(210, 75, 75);
+  opacity: 1;
+}
