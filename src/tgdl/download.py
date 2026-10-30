@@ -3,8 +3,7 @@
 模型很简单：**一个账号 = 一条 TCP = 一把 key**，每个账号跑 ``connections`` 个
 并发任务共享同一条连接，所有任务从同一个分片队列里抢活。
 
-限流按 auth key 算，所以账号之间互不影响：某个账号撞了 FLOOD_WAIT 只睡它自己，
-其它账号继续搬。
+每个账号一条连接，撞了 FLOOD_WAIT 只睡它自己，其它账号继续搬。
 """
 
 from __future__ import annotations
@@ -357,8 +356,8 @@ async def download(
                 )
             clients[account_id] = client
 
-        # 同一个 Telegram 账号登了两次（两个会话文件）没有意义：
-        # 它们共用一份限流额度，多开的那条只会白白抢请求。留编号最小的。
+        # 同一个 Telegram 账号登了两次（两个会话文件）：设备列表里会多出一条会话，
+        # 也违背「一个账号一条连接」的模型。留编号最小的那个。
         if len(clients) > 1:
             mes = await asyncio.gather(
                 *(c.get_me() for c in clients.values()), return_exceptions=True
@@ -370,7 +369,7 @@ async def download(
                     continue
                 if uid in owner:
                     print(f"[{account_id}] 和账号 {owner[uid]} 是同一个 Telegram 账号，"
-                          f"跳过它（同一个号开两条连接没有意义）")
+                          f"跳过它（想加速请用别的账号）")
                     with contextlib.suppress(Exception):
                         await clients.pop(account_id).disconnect()
                 else:
@@ -417,7 +416,11 @@ async def download(
         # 一个「大小刚好」的文件。所以还要确认 db 里没有它的未完成记录。
         if target.exists() and target.stat().st_size == chosen.size:
             probe = ProgressDb(cfg.db_path)
-            half_done = probe.exists(f"{chat_id}:{chosen.message_id}")
+            # load() 会顺手清掉「记录还在、文件却没了」这种作废行
+            half_done = probe.load(
+                f"{chat_id}:{chosen.message_id}",
+                path=target, size=chosen.size, chunk=chunk_size,
+            ) is not None
             probe.close()
             if not half_done:
                 return Result(path=target, size=chosen.size, seconds=0.0,

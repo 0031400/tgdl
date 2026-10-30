@@ -267,6 +267,22 @@ async def logout(cfg: Config, account_ids: list[int]) -> list[str]:
     return lines
 
 
+def drop_duplicates(cfg: Config, pairs: list[tuple[int, int]]) -> list[str]:
+    """删掉重复登录的账号。``pairs`` = [(要删的编号, 保留的编号)]。
+
+    **只删本地**：不动服务端授权。因为两个会话文件里可能装的是同一把 auth key
+    （手改 keys.json 复制出来的），去撤销它会把要保留的那个一起踢下线。
+    要清理设备列表里的死会话，请自己在手机「设置 → 设备」里删。
+    """
+    lines: list[str] = []
+    for dup, keep in pairs:
+        remove_session(cfg, dup)
+        lines.append(
+            f"[{dup}] 和 [{keep}] 是同一个账号，已删除本地会话（服务端授权没动）"
+        )
+    return lines
+
+
 async def describe(cfg: Config, account_id: int) -> dict:
     """联网确认一个账号：姓名、用户名、主 DC。"""
     client = make_client(cfg, account_id)

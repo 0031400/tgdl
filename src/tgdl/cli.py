@@ -24,6 +24,7 @@ from .account import (
     TgdlError,
     apply_credentials,
     describe,
+    drop_duplicates,
     list_accounts,
     login as do_login,
     logout as do_logout,
@@ -143,7 +144,7 @@ def logout(
 
 @app.command()
 def accounts() -> None:
-    """列出账号（先按 keys.json 刷新会话，再联网确认）。"""
+    """列出账号（按 keys.json 刷新会话 → 联网确认 → 清掉重复登录）。"""
     cfg = _load()
     # keys.json 是凭据清单：手改过就先灌进 session 文件，再联网确认
     for note in apply_credentials(cfg, force=True):
@@ -154,18 +155,33 @@ def accounts() -> None:
         console.print("[yellow]还没有账号。`tgdl login --account 1`[/yellow]")
         return
 
+    infos = [(account_id, _run(describe(cfg, account_id))) for account_id in ids]
+
+    # 同一个 Telegram 账号登了两次：留编号最小的，其余删掉
+    owner: dict[int, int] = {}
+    dup_pairs: list[tuple[int, int]] = []
+    for account_id, info in infos:
+        uid = info.get("uid")
+        if not info.get("ok") or not uid:
+            continue
+        if uid in owner:
+            dup_pairs.append((account_id, owner[uid]))
+        else:
+            owner[uid] = account_id
+    if dup_pairs:
+        for line in drop_duplicates(cfg, dup_pairs):
+            console.print(f"[yellow]{line}[/yellow]")
+        dropped = {dup for dup, _ in dup_pairs}
+        infos = [(i, info) for i, info in infos if i not in dropped]
+
+    cache = KeyStore(cfg.keys_path).summary()
     table = Table(box=box.SIMPLE, header_style="bold")
     table.add_column("编号", justify="right")
     table.add_column("姓名")
     table.add_column("用户名")
     table.add_column("主 DC", justify="center")
     table.add_column("DC key 缓存")
-
-    cache = KeyStore(cfg.keys_path).summary()
-    seen: dict[int, int] = {}
-    dupes: list[str] = []
-    for account_id in ids:
-        info = _run(describe(cfg, account_id))
+    for account_id, info in infos:
         cached = cache.get(account_id) or {}
         cached_text = "，".join(f"DC{dc}" for dc in sorted(cached)) or "[dim]—[/dim]"
         if info.get("ok"):
@@ -175,21 +191,9 @@ def accounts() -> None:
                 f"DC{info['dc']}" if info.get("dc") else "—",
                 cached_text,
             )
-            uid = info.get("uid")
-            if uid:
-                if uid in seen:
-                    dupes.append(f"#{account_id} 和 #{seen[uid]} 是同一个账号")
-                else:
-                    seen[uid] = account_id
         else:
             table.add_row(str(account_id), "[red]未登录[/red]", "—", "—", cached_text)
     console.print(table)
-    if dupes:
-        console.print(
-            "[yellow]注意：" + "；".join(dupes)
-            + "。同时用会共用同一份限流额度，等于白开一条连接。"
-            + "不要的话 `tgdl logout --account <编号>`。[/yellow]"
-        )
 
 
 @app.command()

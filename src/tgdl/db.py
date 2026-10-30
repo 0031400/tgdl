@@ -40,16 +40,25 @@ class ProgressDb:
 
     # ---- 断点续传 ----
     def load(self, key: str, *, path: Path, size: int, chunk: int) -> bytes | None:
-        """拿到上次的位图；path / size / chunk 对不上就当没有。"""
+        """拿到上次的位图；对不上就当没有，并把这条作废的记录删掉。
+
+        三种对不上的情况：换了输出路径、文件大小变了、分片大小变了。
+        另外**文件本身没了**也算——数据库里留着一条指向已删除文件的记录毫无意义，
+        下次还会误判成「有未完成的下载」。
+        """
         row = self._conn.execute(
             "SELECT path, size, chunk, done FROM progress WHERE key = ?", (key,)
         ).fetchone()
         if row is None:
             return None
         old_path, old_size, old_chunk, done = row
-        if old_size != size or old_chunk != chunk:
-            return None
-        if Path(old_path) != Path(path) or not Path(path).exists():
+        if (
+            old_size != size
+            or old_chunk != chunk
+            or Path(old_path) != Path(path)
+            or not Path(path).exists()
+        ):
+            self.clear(key)
             return None
         return bytes(done)
 
@@ -66,12 +75,6 @@ class ProgressDb:
     def clear(self, key: str) -> None:
         self._conn.execute("DELETE FROM progress WHERE key = ?", (key,))
         self._conn.commit()
-
-    def exists(self, key: str) -> bool:
-        """这条 key 有没有未完成的进度记录（用来判断文件是不是下了一半）。"""
-        return self._conn.execute(
-            "SELECT 1 FROM progress WHERE key = ? LIMIT 1", (key,)
-        ).fetchone() is not None
 
     def keys(self) -> list[str]:
         return [r[0] for r in self._conn.execute("SELECT key FROM progress")]
